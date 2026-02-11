@@ -21,8 +21,8 @@ class HtmlEpubDocumentViewController: UIViewController {
     private let viewModel: ViewModel<HtmlEpubReaderActionHandler>
     private let disposeBag: DisposeBag
 
-    private weak var webView: WKWebView!
-    private var webViewHandler: WebViewHandler!
+    private(set) weak var webView: WKWebView!
+    var webViewHandler: WebViewHandler!
     weak var parentDelegate: HtmlEpubReaderContainerDelegate?
 
     init(viewModel: ViewModel<HtmlEpubReaderActionHandler>) {
@@ -37,7 +37,8 @@ class HtmlEpubDocumentViewController: UIViewController {
 
     override func loadView() {
         view = UIView()
-        view.backgroundColor = .systemBackground
+        // Start with clear background to prevent black bar, will be updated based on appearance
+        view.backgroundColor = .clear
     }
 
     override func viewDidLoad() {
@@ -70,16 +71,26 @@ class HtmlEpubDocumentViewController: UIViewController {
             configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
             let webView = HtmlEpubWebView(customMenuActions: [highlightAction, underlineAction], configuration: configuration)
             webView.translatesAutoresizingMaskIntoConstraints = false
+            webView.isOpaque = false
+            webView.backgroundColor = .clear
+            webView.scrollView.backgroundColor = .clear
+            webView.scrollView.contentInsetAdjustmentBehavior = .never
+            webView.scrollView.isScrollEnabled = false
+            webView.scrollView.bounces = false
+            webView.scrollView.alwaysBounceVertical = false
+            webView.scrollView.alwaysBounceHorizontal = false
+            webView.scrollView.showsVerticalScrollIndicator = false
+            webView.scrollView.showsHorizontalScrollIndicator = false
             if #available(iOS 16.4, *) {
                 webView.isInspectable = true
             }
             view.addSubview(webView)
 
             NSLayoutConstraint.activate([
-                view.safeAreaLayoutGuide.topAnchor.constraint(equalTo: webView.topAnchor),
-                view.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
-                view.safeAreaLayoutGuide.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
-                view.safeAreaLayoutGuide.trailingAnchor.constraint(equalTo: webView.trailingAnchor)
+                webView.topAnchor.constraint(equalTo: view.topAnchor),
+                webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
             ])
             self.webView = webView
             webViewHandler = WebViewHandler(webView: webView, javascriptHandlers: JSHandlers.allCases.map({ $0.rawValue }))
@@ -106,6 +117,64 @@ class HtmlEpubDocumentViewController: UIViewController {
     private func deselectText() {
         webViewHandler.call(javascript: "window._view.selectAnnotations([]);").subscribe().disposed(by: disposeBag)
     }
+    
+    private var lastKnownCFI: String?
+    private var capturedCFIForRestore: String?
+    
+    func updateLastKnownPosition(cfi: String?) {
+        lastKnownCFI = cfi
+    }
+    
+    func capturePositionForRestore() {
+        guard let cfi = lastKnownCFI, !cfi.isEmpty, cfi != "_start" else {
+            DDLogInfo("HtmlEpubDocumentViewController: no valid CFI to capture (lastKnownCFI: \(String(describing: lastKnownCFI)))")
+            capturedCFIForRestore = nil
+            return
+        }
+        
+        // Strip character offset from CFI - we'll navigate to the element and let it scroll to top
+        // The character offset is viewport-dependent, so it causes position drift between sizes
+        if let colonIndex = cfi.lastIndex(of: ":") {
+            capturedCFIForRestore = String(cfi[..<colonIndex])
+            DDLogInfo("HtmlEpubDocumentViewController: captured CFI \(cfi) -> \(capturedCFIForRestore!)")
+        } else {
+            capturedCFIForRestore = cfi
+            DDLogInfo("HtmlEpubDocumentViewController: captured CFI \(cfi)")
+        }
+    }
+    
+    func captureAndResizeWithPositionPreservation(completion: @escaping () -> Void) {
+        // In paginated mode, epub.js will automatically maintain position using CFI
+        // We just need to trigger the resize and let epub.js handle position restoration
+        // with the fixed offsetBlock support in PaginatedFlow.scrollIntoView()
+        DDLogInfo("HtmlEpubDocumentViewController: preparing for resize with position preservation")
+        
+        // Call the completion block to trigger the resize
+        completion()
+        
+        // After layout settles, manually trigger a resize event so epub.js updates its state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DDLogInfo("HtmlEpubDocumentViewController: dispatching resize event after layout")
+            self.webViewHandler.call(javascript: "window.dispatchEvent(new Event('resize'));")
+                .subscribe()
+                .disposed(by: self.disposeBag)
+        }
+    }
+    
+    func notifyResized() {
+        // Log current WebView size
+        if let webView = self.webView {
+            DDLogInfo("HtmlEpubDocumentViewController: WebView frame: \(webView.frame)")
+        }
+        
+        // Dispatch a native resize event to the window, which epub.js listens to
+        // This is better than manually calling _handleResize() because it goes through
+        // the proper event handling chain that epub.js has set up
+        DDLogInfo("HtmlEpubDocumentViewController: dispatching resize event")
+        webViewHandler.call(javascript: "window.dispatchEvent(new Event('resize'));")
+            .subscribe()
+            .disposed(by: disposeBag)
+    }
 
     private func process(state: HtmlEpubReaderState) {
         if state.changes.contains(.readerInitialised) {
@@ -115,6 +184,10 @@ class HtmlEpubDocumentViewController: UIViewController {
 
         if let data = state.documentData {
             load(documentData: data)
+            // Apply typesetting settings after document loads
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.applyTypesettingSettings(from: state.settings)
+            }
             return
         }
 
@@ -143,6 +216,8 @@ class HtmlEpubDocumentViewController: UIViewController {
 
         if state.changes.contains(.appearance) {
             updateInterface(to: state.settings.appearance, userInterfaceStyle: state.interfaceStyle)
+            // Reapply typesetting when appearance changes
+            applyTypesettingSettings(from: state.settings)
         }
 
         func search(term: String) {
@@ -202,16 +277,29 @@ class HtmlEpubDocumentViewController: UIViewController {
     }
 
     private func updateInterface(to appearanceMode: ReaderSettingsState.Appearance, userInterfaceStyle: UIUserInterfaceStyle) {
+        let backgroundColor: UIColor
         switch appearanceMode {
         case .automatic:
             webView.overrideUserInterfaceStyle = userInterfaceStyle
+            backgroundColor = userInterfaceStyle == .dark ? .black : .white
 
-        case .light, .sepia:
+        case .light:
             webView.overrideUserInterfaceStyle = .light
+            backgroundColor = .white
+
+        case .sepia:
+            webView.overrideUserInterfaceStyle = .light
+            backgroundColor = UIColor(red: 0.98, green: 0.95, blue: 0.89, alpha: 1.0)
 
         case .dark:
             webView.overrideUserInterfaceStyle = .dark
+            backgroundColor = .black
         }
+        
+        view.backgroundColor = backgroundColor
+        webView.backgroundColor = backgroundColor
+        webView.scrollView.backgroundColor = backgroundColor
+        
         let appearanceString = Appearance.from(appearanceMode: appearanceMode, interfaceStyle: userInterfaceStyle).htmlEpubValue
         webView.call(javascript: "window._view.setColorScheme('\(appearanceString)');").subscribe().disposed(by: disposeBag)
     }
@@ -254,6 +342,7 @@ class HtmlEpubDocumentViewController: UIViewController {
 
             switch event {
             case "onInitialized":
+                DDLogInfo("HtmlEpubDocumentViewController: onInitialized")
                 viewModel.process(action: .loadDocument)
 
             case "onSaveAnnotations":
@@ -305,6 +394,11 @@ class HtmlEpubDocumentViewController: UIViewController {
                     DDLogWarn("HtmlEpubDocumentViewController: event \(event) missing params - \(message)")
                     return
                 }
+                // Store the current CFI for position restoration
+                if let state = params["state"] as? [String: Any], let cfi = state["cfi"] as? String {
+                    DDLogInfo("HtmlEpubDocumentViewController: updating lastKnownCFI to: \(cfi)")
+                    updateLastKnownPosition(cfi: cfi)
+                }
                 viewModel.process(action: .setViewState(params))
 
             case "onOpenLink":
@@ -330,6 +424,31 @@ class HtmlEpubDocumentViewController: UIViewController {
         default:
             break
         }
+    }
+    
+    // MARK: - Typesetting
+    
+    private func applyTypesettingSettings(from settings: HtmlEpubSettings) {
+        guard let webView else {
+            DDLogWarn("HtmlEpubDocumentViewController: Cannot apply typesetting - webView is nil")
+            return
+        }
+        DDLogInfo("HtmlEpubDocumentViewController: Applying typesetting - font: \(settings.typesetting.fontFamily ?? "default"), customFont: \(settings.customFont ?? "none")")
+        
+        // Get fresh settings from FontManager to ensure we have latest font selections
+        let fontManager = FontManager.shared
+        var appliedSettings = settings.typesetting
+        
+        // Override font family if custom font is set
+        if let customFont = settings.customFont {
+            appliedSettings.fontFamily = customFont
+            DDLogInfo("HtmlEpubDocumentViewController: Using custom font: \(customFont)")
+        } else if let documentCustomFont = fontManager.font(forDocument: viewModel.state.key) {
+            appliedSettings.fontFamily = documentCustomFont
+            DDLogInfo("HtmlEpubDocumentViewController: Using document custom font: \(documentCustomFont)")
+        }
+        
+        TypesettingApplicator.applySettings(appliedSettings, appearance: settings.appearance, to: webView)
     }
 }
 
