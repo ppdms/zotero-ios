@@ -11,6 +11,7 @@ npm run build:ios
 cd ..
 
 echo "Copying bundle..."
+mkdir -p bundled/reader
 rm -rf bundled/reader/*
 cp -r reader/build/ios/* bundled/reader/
 

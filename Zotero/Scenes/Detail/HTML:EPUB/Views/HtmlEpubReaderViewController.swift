@@ -564,13 +564,7 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
     }
 
     func topDidChange(forToolbarState state: AnnotationToolbarHandler.State) {
-        // With safeAreaLayoutGuide, the WebView automatically adjusts to visible area
-        // No need to manually change constraints - just trigger layout
         view.layoutIfNeeded()
-        
-        // Note: We don't call notifyResized() here because captureAndResizeWithPositionPreservation()
-        // handles position restoration using scroll percentage, which doesn't need epub.js's
-        // CFI-based position tracking
     }
 
     func updateStatusBar() {
@@ -645,29 +639,22 @@ extension HtmlEpubReaderViewController: HtmlEpubReaderContainerDelegate {
         statusBarVisible = !isHidden
         annotationToolbarHandler?.interfaceVisibilityDidChange()
 
-        // If we're changing navbar visibility, capture position BEFORE the resize
+        // Position preservation during resize is handled by epub-view.ts _handleResize
+        // (via _keepPosition), which captures the CFI and navigates back to it after reflow.
         if shouldChangeNavigationBarVisibility {
-            documentController?.captureAndResizeWithPositionPreservation { [weak self] in
-                guard let self else { return }
-                
-                // Perform the actual resize inside the animation
-                UIView.animate(withDuration: 0.15) {
-                    self.updateStatusBar()
-                    self.navigationController?.navigationBar.alpha = isHidden ? 0 : 1
-                    self.navigationController?.setNavigationBarHidden(isHidden, animated: false)
-                    
-                    // Option 2B: Swap constraints to resize WebView properly
-                    if isHidden {
-                        // Going to fullscreen: WebView extends to view.topAnchor
-                        self.documentTopConstraintWithNavbar.isActive = false
-                        self.documentTopConstraintFullscreen.isActive = true
-                    } else {
-                        // Showing navbar: WebView starts at safeAreaLayoutGuide.topAnchor
-                        self.documentTopConstraintFullscreen.isActive = false
-                        self.documentTopConstraintWithNavbar.isActive = true
-                    }
-                    self.view.layoutIfNeeded()
+            UIView.animate(withDuration: 0.15) {
+                self.updateStatusBar()
+                self.navigationController?.navigationBar.alpha = isHidden ? 0 : 1
+                self.navigationController?.setNavigationBarHidden(isHidden, animated: false)
+
+                if isHidden {
+                    self.documentTopConstraintWithNavbar.isActive = false
+                    self.documentTopConstraintFullscreen.isActive = true
+                } else {
+                    self.documentTopConstraintFullscreen.isActive = false
+                    self.documentTopConstraintWithNavbar.isActive = true
                 }
+                self.view.layoutIfNeeded()
             }
         } else {
             // No navbar change, just do normal animation

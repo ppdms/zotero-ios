@@ -70,6 +70,9 @@ class HtmlEpubDocumentViewController: UIViewController {
             let configuration = WKWebViewConfiguration()
             configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
             let webView = HtmlEpubWebView(customMenuActions: [highlightAction, underlineAction], configuration: configuration)
+            if #available(iOS 16.4, *) {
+                webView.isInspectable = true
+            }
             webView.translatesAutoresizingMaskIntoConstraints = false
             webView.isOpaque = false
             webView.backgroundColor = .clear
@@ -119,61 +122,8 @@ class HtmlEpubDocumentViewController: UIViewController {
     }
     
     private var lastKnownCFI: String?
-    private var capturedCFIForRestore: String?
-    
     func updateLastKnownPosition(cfi: String?) {
         lastKnownCFI = cfi
-    }
-    
-    func capturePositionForRestore() {
-        guard let cfi = lastKnownCFI, !cfi.isEmpty, cfi != "_start" else {
-            DDLogInfo("HtmlEpubDocumentViewController: no valid CFI to capture (lastKnownCFI: \(String(describing: lastKnownCFI)))")
-            capturedCFIForRestore = nil
-            return
-        }
-        
-        // Strip character offset from CFI - we'll navigate to the element and let it scroll to top
-        // The character offset is viewport-dependent, so it causes position drift between sizes
-        if let colonIndex = cfi.lastIndex(of: ":") {
-            capturedCFIForRestore = String(cfi[..<colonIndex])
-            DDLogInfo("HtmlEpubDocumentViewController: captured CFI \(cfi) -> \(capturedCFIForRestore!)")
-        } else {
-            capturedCFIForRestore = cfi
-            DDLogInfo("HtmlEpubDocumentViewController: captured CFI \(cfi)")
-        }
-    }
-    
-    func captureAndResizeWithPositionPreservation(completion: @escaping () -> Void) {
-        // In paginated mode, epub.js will automatically maintain position using CFI
-        // We just need to trigger the resize and let epub.js handle position restoration
-        // with the fixed offsetBlock support in PaginatedFlow.scrollIntoView()
-        DDLogInfo("HtmlEpubDocumentViewController: preparing for resize with position preservation")
-        
-        // Call the completion block to trigger the resize
-        completion()
-        
-        // After layout settles, manually trigger a resize event so epub.js updates its state
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            DDLogInfo("HtmlEpubDocumentViewController: dispatching resize event after layout")
-            self.webViewHandler.call(javascript: "window.dispatchEvent(new Event('resize'));")
-                .subscribe()
-                .disposed(by: self.disposeBag)
-        }
-    }
-    
-    func notifyResized() {
-        // Log current WebView size
-        if let webView = self.webView {
-            DDLogInfo("HtmlEpubDocumentViewController: WebView frame: \(webView.frame)")
-        }
-        
-        // Dispatch a native resize event to the window, which epub.js listens to
-        // This is better than manually calling _handleResize() because it goes through
-        // the proper event handling chain that epub.js has set up
-        DDLogInfo("HtmlEpubDocumentViewController: dispatching resize event")
-        webViewHandler.call(javascript: "window.dispatchEvent(new Event('resize'));")
-            .subscribe()
-            .disposed(by: disposeBag)
     }
 
     private func process(state: HtmlEpubReaderState) {
