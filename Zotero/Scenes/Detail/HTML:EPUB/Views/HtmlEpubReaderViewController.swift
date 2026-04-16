@@ -90,6 +90,19 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
             .disposed(by: disposeBag)
         return typesetting
     }()
+    
+    private lazy var typesettingButton: UIBarButtonItem = {
+        let typesetting = UIBarButtonItem(image: UIImage(systemName: "textformat.size"), style: .plain, target: nil, action: nil)
+        typesetting.accessibilityLabel = "Typesetting"
+        typesetting.title = "Typesetting"
+        typesetting.rx.tap
+            .subscribe(onNext: { [weak self] _ in
+                guard let self else { return }
+                showTypesettingMenu()
+            })
+            .disposed(by: disposeBag)
+        return typesetting
+    }()
     private lazy var searchButton: UIBarButtonItem = {
         let search = UIBarButtonItem(image: UIImage(systemName: "magnifyingglass"), style: .plain, target: nil, action: nil)
         search.accessibilityLabel = L10n.Accessibility.Pdf.searchPdf
@@ -133,6 +146,7 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
 
         setActivity()
         viewModel.process(action: .changeIdleTimerDisabled(true))
+        view.backgroundColor = .clear
         view.backgroundColor = .clear
         observeViewModel()
         setupNavigationBar()
@@ -200,11 +214,17 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
                 documentController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                 documentLeftConstraint,
                 sidebarController.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                documentController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                documentController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                documentLeftConstraint,
+                sidebarController.view.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
                 sidebarController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
                 sidebarController.view.widthAnchor.constraint(equalToConstant: PDFReaderLayout.sidebarWidth),
                 sidebarLeftConstraint,
                 separator.widthAnchor.constraint(equalToConstant: PDFReaderLayout.separatorWidth),
                 separator.leadingAnchor.constraint(equalTo: sidebarController.view.trailingAnchor),
+                separator.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                separator.bottomAnchor.constraint(equalTo: view.bottomAnchor)
                 separator.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
                 separator.bottomAnchor.constraint(equalTo: view.bottomAnchor)
             ])
@@ -413,6 +433,18 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
         case .dark:
             view.backgroundColor = .black
         }
+
+        let appearance = Appearance.from(appearanceMode: settings.appearance, interfaceStyle: viewModel.state.interfaceStyle)
+        switch appearance {
+        case .light:
+            view.backgroundColor = .white
+
+        case .sepia:
+            view.backgroundColor = UIColor(red: 0.98, green: 0.95, blue: 0.89, alpha: 1.0)
+
+        case .dark:
+            view.backgroundColor = .black
+        }
     }
 
     private func toggleSidebar(animated: Bool) {
@@ -431,6 +463,13 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
                     customFont: self.viewModel.state.settings.customFont
                 )
                 self.viewModel.process(action: .setSettings(settings))
+                guard let self else { return }
+                let settings = HtmlEpubSettings(
+                    appearance: state.appearance,
+                    typesetting: self.viewModel.state.settings.typesetting,
+                    customFont: self.viewModel.state.settings.customFont
+                )
+                self.viewModel.process(action: .setSettings(settings))
             })
             .disposed(by: disposeBag)
     }
@@ -441,10 +480,80 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
 
     private func createRightBarButtonItems() -> [UIBarButtonItem] {
         var buttons = [settingsButton, searchButton, typesettingButton]
+        var buttons = [settingsButton, searchButton, typesettingButton]
         if viewModel.state.library.metadataEditable {
             buttons.append(toolbarButton)
         }
         return buttons
+    }
+    
+    // MARK: - Font & Typesetting
+    
+    private func showFontManagement() {
+        let fontVC = FontManagementViewController(documentKey: viewModel.state.key)
+        fontVC.delegate = self
+        let navController = UINavigationController(rootViewController: fontVC)
+        navigationController?.present(navController, animated: true)
+    }
+    
+    private func showTypesettingMenu() {
+        let settings = FontManager.shared.typesettingSettings(forDocument: viewModel.state.key)
+        let typesettingVC = TypesettingMenuViewController(settings: settings, documentKey: viewModel.state.key)
+        typesettingVC.delegate = self
+        let navController = UINavigationController(rootViewController: typesettingVC)
+        
+        // Hide navigation bar to save space
+        navController.navigationBar.isHidden = true
+        
+        // Configure as popover with 60% screen height and no dimming
+        navController.modalPresentationStyle = .pageSheet
+        if let sheet = navController.sheetPresentationController {
+            let screenHeight = UIScreen.main.bounds.height
+            let detent = UISheetPresentationController.Detent.custom { _ in
+                return screenHeight * 0.6
+            }
+            sheet.detents = [detent]
+            sheet.prefersGrabberVisible = false
+            sheet.largestUndimmedDetentIdentifier = detent.identifier
+        }
+        
+        navigationController?.present(navController, animated: true)
+    }
+    
+    private func applyCurrentTypesettingSettings() {
+        guard let documentController, let webView = documentController.webView else {
+            DDLogWarn("HtmlEpubReaderViewController: Cannot apply typesetting - documentController or webView is nil")
+            return
+        }
+        
+        DDLogInfo("HtmlEpubReaderViewController: Applying current typesetting settings for document \(viewModel.state.key)")
+        
+        let fontManager = FontManager.shared
+        let settings = fontManager.typesettingSettings(forDocument: viewModel.state.key)
+        
+        // Apply custom font if set
+        var appliedSettings = settings
+        if let customFontFamily = fontManager.font(forDocument: viewModel.state.key) {
+            DDLogInfo("HtmlEpubReaderViewController: Using custom font: \(customFontFamily)")
+            appliedSettings.fontFamily = customFontFamily
+        } else {
+            DDLogInfo("HtmlEpubReaderViewController: No custom font set, using default: \(appliedSettings.fontFamily ?? "system")")
+        }
+        
+        // Apply settings to web view
+        TypesettingApplicator.applySettings(
+            appliedSettings,
+            appearance: viewModel.state.settings.appearance,
+            to: webView
+        )
+        
+        // Update HtmlEpubSettings
+        let updatedSettings = HtmlEpubSettings(
+            appearance: viewModel.state.settings.appearance,
+            typesetting: appliedSettings,
+            customFont: fontManager.font(forDocument: viewModel.state.key)
+        )
+        viewModel.process(action: .setSettings(updatedSettings))
     }
     
     // MARK: - Font & Typesetting
@@ -522,6 +631,8 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
         let leading = isSidebarVisible ? (documentControllerLeft?.constant ?? 0) : 0
         // With safeAreaLayoutGuide, top inset is always 0 since the view starts at safe area
         return NSDirectionalEdgeInsets(top: 0, leading: leading, bottom: 0, trailing: 0)
+        // With safeAreaLayoutGuide, top inset is always 0 since the view starts at safe area
+        return NSDirectionalEdgeInsets(top: 0, leading: leading, bottom: 0, trailing: 0)
     }
 
     var isNavigationBarHidden: Bool {
@@ -560,6 +671,7 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
     }
 
     func topDidChange(forToolbarState state: AnnotationToolbarHandler.State) {
+        view.layoutIfNeeded()
         view.layoutIfNeeded()
     }
 
@@ -660,6 +772,7 @@ extension HtmlEpubReaderViewController: HtmlEpubReaderContainerDelegate {
                 view.layoutIfNeeded()
             }
         }
+        }
 
         if isHidden && isSidebarVisible {
             toggleSidebar(animated: true)
@@ -698,6 +811,26 @@ extension HtmlEpubReaderViewController: HtmlEpubSidebarDelegate {
         if isSidebarVisible && sidebarController?.view.frame.width == view.frame.width {
             toggleSidebar(animated: true)
         }
+    }
+}
+
+// MARK: - FontManagementDelegate
+
+extension HtmlEpubReaderViewController: FontManagementDelegate {
+    func fontManagementDidSelectFont(_ font: FontMetadata?, forDocument documentKey: String?) {
+        applyCurrentTypesettingSettings()
+    }
+    
+    func fontManagementDidUpdateSettings() {
+        applyCurrentTypesettingSettings()
+    }
+}
+
+// MARK: - TypesettingMenuDelegate
+
+extension HtmlEpubReaderViewController: TypesettingMenuDelegate {
+    func typesettingMenuDidUpdateSettings(_ settings: TypesettingSettings) {
+        applyCurrentTypesettingSettings()
     }
 }
 

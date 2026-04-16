@@ -23,6 +23,8 @@ class HtmlEpubDocumentViewController: UIViewController {
 
     private(set) weak var webView: WKWebView!
     var webViewHandler: WebViewHandler!
+    private(set) weak var webView: WKWebView!
+    var webViewHandler: WebViewHandler!
     weak var parentDelegate: HtmlEpubReaderContainerDelegate?
 
     init(viewModel: ViewModel<HtmlEpubReaderActionHandler>) {
@@ -37,6 +39,8 @@ class HtmlEpubDocumentViewController: UIViewController {
 
     override func loadView() {
         view = UIView()
+        // Start with clear background to prevent black bar, will be updated based on appearance
+        view.backgroundColor = .clear
         // Start with clear background to prevent black bar, will be updated based on appearance
         view.backgroundColor = .clear
     }
@@ -73,7 +77,20 @@ class HtmlEpubDocumentViewController: UIViewController {
             if #available(iOS 16.4, *) {
                 webView.isInspectable = true
             }
+            if #available(iOS 16.4, *) {
+                webView.isInspectable = true
+            }
             webView.translatesAutoresizingMaskIntoConstraints = false
+            webView.isOpaque = false
+            webView.backgroundColor = .clear
+            webView.scrollView.backgroundColor = .clear
+            webView.scrollView.contentInsetAdjustmentBehavior = .never
+            webView.scrollView.isScrollEnabled = false
+            webView.scrollView.bounces = false
+            webView.scrollView.alwaysBounceVertical = false
+            webView.scrollView.alwaysBounceHorizontal = false
+            webView.scrollView.showsVerticalScrollIndicator = false
+            webView.scrollView.showsHorizontalScrollIndicator = false
             webView.isOpaque = false
             webView.backgroundColor = .clear
             webView.scrollView.backgroundColor = .clear
@@ -90,6 +107,10 @@ class HtmlEpubDocumentViewController: UIViewController {
             view.addSubview(webView)
 
             NSLayoutConstraint.activate([
+                webView.topAnchor.constraint(equalTo: view.topAnchor),
+                webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
                 webView.topAnchor.constraint(equalTo: view.topAnchor),
                 webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
                 webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -185,6 +206,10 @@ class HtmlEpubDocumentViewController: UIViewController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.applyTypesettingSettings(from: state.settings)
             }
+            // Apply typesetting settings after document loads
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.applyTypesettingSettings(from: state.settings)
+            }
             return
         }
 
@@ -213,6 +238,8 @@ class HtmlEpubDocumentViewController: UIViewController {
 
         if state.changes.contains(.appearance) {
             updateInterface(to: state.settings.appearance, userInterfaceStyle: state.interfaceStyle)
+            // Reapply typesetting when appearance changes
+            applyTypesettingSettings(from: state.settings)
             // Reapply typesetting when appearance changes
             applyTypesettingSettings(from: state.settings)
         }
@@ -275,6 +302,7 @@ class HtmlEpubDocumentViewController: UIViewController {
 
     private func updateInterface(to appearanceMode: ReaderSettingsState.Appearance, userInterfaceStyle: UIUserInterfaceStyle) {
         let backgroundColor: UIColor
+        let backgroundColor: UIColor
         switch appearanceMode {
         case .automatic:
             webView.overrideUserInterfaceStyle = userInterfaceStyle
@@ -283,15 +311,28 @@ class HtmlEpubDocumentViewController: UIViewController {
         case .light:
             webView.overrideUserInterfaceStyle = .light
             backgroundColor = .white
+            backgroundColor = userInterfaceStyle == .dark ? .black : .white
+
+        case .light:
+            webView.overrideUserInterfaceStyle = .light
+            backgroundColor = .white
 
         case .sepia:
+        case .sepia:
             webView.overrideUserInterfaceStyle = .light
+            backgroundColor = UIColor(red: 0.98, green: 0.95, blue: 0.89, alpha: 1.0)
             backgroundColor = UIColor(red: 0.98, green: 0.95, blue: 0.89, alpha: 1.0)
 
         case .dark:
             webView.overrideUserInterfaceStyle = .dark
             backgroundColor = .black
+            backgroundColor = .black
         }
+        
+        view.backgroundColor = backgroundColor
+        webView.backgroundColor = backgroundColor
+        webView.scrollView.backgroundColor = backgroundColor
+        
         
         view.backgroundColor = backgroundColor
         webView.backgroundColor = backgroundColor
@@ -339,6 +380,7 @@ class HtmlEpubDocumentViewController: UIViewController {
 
             switch event {
             case "onInitialized":
+                DDLogInfo("HtmlEpubDocumentViewController: onInitialized")
                 DDLogInfo("HtmlEpubDocumentViewController: onInitialized")
                 viewModel.process(action: .loadDocument)
 
@@ -428,6 +470,31 @@ class HtmlEpubDocumentViewController: UIViewController {
         default:
             break
         }
+    }
+    
+    // MARK: - Typesetting
+    
+    private func applyTypesettingSettings(from settings: HtmlEpubSettings) {
+        guard let webView else {
+            DDLogWarn("HtmlEpubDocumentViewController: Cannot apply typesetting - webView is nil")
+            return
+        }
+        DDLogInfo("HtmlEpubDocumentViewController: Applying typesetting - font: \(settings.typesetting.fontFamily ?? "default"), customFont: \(settings.customFont ?? "none")")
+        
+        // Get fresh settings from FontManager to ensure we have latest font selections
+        let fontManager = FontManager.shared
+        var appliedSettings = settings.typesetting
+        
+        // Override font family if custom font is set
+        if let customFont = settings.customFont {
+            appliedSettings.fontFamily = customFont
+            DDLogInfo("HtmlEpubDocumentViewController: Using custom font: \(customFont)")
+        } else if let documentCustomFont = fontManager.font(forDocument: viewModel.state.key) {
+            appliedSettings.fontFamily = documentCustomFont
+            DDLogInfo("HtmlEpubDocumentViewController: Using document custom font: \(documentCustomFont)")
+        }
+        
+        TypesettingApplicator.applySettings(appliedSettings, appearance: settings.appearance, to: webView)
     }
     
     // MARK: - Typesetting
