@@ -134,6 +134,7 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
         setActivity()
         viewModel.process(action: .changeIdleTimerDisabled(true))
         view.backgroundColor = .clear
+        view.backgroundColor = .clear
         observeViewModel()
         setupNavigationBar()
         setupViews()
@@ -245,7 +246,6 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
         annotationToolbarHandler?.viewIsAppearing(editingEnabled: viewModel.state.library.metadataEditable)
-        updateWebViewTransform()
     }
 
     deinit {
@@ -272,9 +272,9 @@ class HtmlEpubReaderViewController: UIViewController, ReaderViewController, Pare
 
         coordinator.animate(alongsideTransition: { [weak self] _ in
             guard let self else { return }
-            statusBarHeight = view.safeAreaInsets.top - (navigationController?.isNavigationBarHidden == true ? 0 : navigationBarHeight)
+            statusBarHeight = view.safeAreaInsets.top - navigationBarHeight
             annotationToolbarHandler?.viewWillTransitionToNewSize()
-            updateWebViewTransform()
+            documentController?.updateViewportGeometry(statusBarHeight: statusBarHeight, navBarHeight: navigationBarHeight, navBarHidden: !statusBarVisible)
         }, completion: nil)
     }
 
@@ -525,7 +525,7 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
     }
 
     var isNavigationBarHidden: Bool {
-        navigationController?.navigationBar.isHidden ?? false
+        !statusBarVisible
     }
 
     var containerView: UIView {
@@ -546,7 +546,14 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
     }
 
     func setNavigationBar(hidden: Bool, animated: Bool) {
-        navigationController?.setNavigationBarHidden(hidden, animated: animated)
+        if animated {
+            UIView.animate(withDuration: 0.2) {
+                self.navigationController?.navigationBar.alpha = hidden ? 0 : 1
+            }
+        } else {
+            navigationController?.navigationBar.alpha = hidden ? 0 : 1
+        }
+        navigationController?.navigationBar.isUserInteractionEnabled = !hidden
     }
 
     func setNavigationBar(alpha: CGFloat) {
@@ -560,6 +567,7 @@ extension HtmlEpubReaderViewController: AnnotationToolbarHandlerDelegate {
     }
 
     func topDidChange(forToolbarState state: AnnotationToolbarHandler.State) {
+        view.layoutIfNeeded()
         view.layoutIfNeeded()
     }
 
@@ -623,45 +631,42 @@ extension HtmlEpubReaderViewController: HtmlEpubReaderContainerDelegate {
         coordinatorDelegate?.show(url: url)
     }
 
-    private func updateWebViewTransform() {
-        let isHidden = navigationController?.navigationBar.isHidden ?? false
-        let offset: CGFloat = isHidden ? 0 : (navigationController?.navigationBar.frame.maxY ?? 0)
-        documentController?.webView?.transform = offset == 0 ? .identity : CGAffineTransform(translationX: 0, y: offset)
-    }
-
     func toggleInterfaceVisibility() {
-        let isHidden = !(navigationController?.navigationBar.isHidden ?? false)
+        let wantHidden = statusBarVisible
         let shouldChangeNavigationBarVisibility = !toolbarState.visible || toolbarState.position != .pinned
 
-        if !isHidden && shouldChangeNavigationBarVisibility && navigationController?.navigationBar.isHidden == true {
-            navigationController?.setNavigationBarHidden(false, animated: false)
-            navigationController?.navigationBar.alpha = 0
+        if !wantHidden && shouldChangeNavigationBarVisibility {
+            navigationController?.navigationBar.isUserInteractionEnabled = true
         }
 
-        statusBarVisible = !isHidden
+        let transformY: CGFloat = wantHidden ? 0 : navigationBarHeight
+
+        statusBarVisible = !wantHidden
         annotationToolbarHandler?.interfaceVisibilityDidChange()
 
-        if shouldChangeNavigationBarVisibility {
-            // Calculate the target transform BEFORE hiding the nav bar (so frame.maxY is valid)
-            let targetOffset: CGFloat = isHidden ? 0 : (navigationController?.navigationBar.frame.maxY ?? 0)
+        documentController?.updateViewportHeight(navBarHidden: wantHidden, statusBarHeight: statusBarHeight, navBarHeight: navigationBarHeight)
 
-            UIView.animate(withDuration: 0.2) {
+        if shouldChangeNavigationBarVisibility {
+            UIView.animate(withDuration: 0.2, animations: {
                 self.updateStatusBar()
-                self.navigationController?.navigationBar.alpha = isHidden ? 0 : 1
-                self.navigationController?.setNavigationBarHidden(isHidden, animated: false)
-                // Shift WebView content visually without changing its size (no reflow)
-                self.documentController?.webView?.transform = targetOffset == 0 ? .identity : CGAffineTransform(translationX: 0, y: targetOffset)
+                self.navigationController?.navigationBar.alpha = wantHidden ? 0 : 1
+                self.documentController?.webView?.transform = CGAffineTransform(translationX: 0, y: transformY)
                 self.view.layoutIfNeeded()
-            }
+            }, completion: { _ in
+                if wantHidden {
+                    self.navigationController?.navigationBar.isUserInteractionEnabled = false
+                }
+            })
         } else {
             UIView.animate(withDuration: 0.15) { [weak self] in
                 guard let self else { return }
                 updateStatusBar()
+                documentController?.webView?.transform = CGAffineTransform(translationX: 0, y: transformY)
                 view.layoutIfNeeded()
             }
         }
 
-        if isHidden && isSidebarVisible {
+        if wantHidden && isSidebarVisible {
             toggleSidebar(animated: true)
         }
     }
@@ -707,7 +712,7 @@ extension HtmlEpubReaderViewController: FontManagementDelegate {
     func fontManagementDidSelectFont(_ font: FontMetadata?, forDocument documentKey: String?) {
         applyCurrentTypesettingSettings()
     }
-    
+
     func fontManagementDidUpdateSettings() {
         applyCurrentTypesettingSettings()
     }
